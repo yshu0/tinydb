@@ -10,7 +10,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
-__all__ = ('Storage', 'JSONStorage', 'MemoryStorage')
+__all__ = ('Storage', 'JSONStorage', 'MemoryStorage', 'RdmaStorage')
 
 
 def touch(path: str, create_dirs: bool):
@@ -175,3 +175,52 @@ class MemoryStorage(Storage):
 
     def write(self, data: Dict[str, Dict[str, Any]]):
         self.memory = data
+
+
+class RdmaStorage(Storage):
+    """Storage using an RDMA memory region via :mod:`pyverbs`."""
+
+    def __init__(self, size: int = 1024 * 1024):
+        """Create a new instance.
+
+        :param size: Size of the RDMA buffer in bytes.
+        """
+
+        super().__init__()
+
+        try:
+            from pyverbs.device import Context
+            from pyverbs.pd import PD
+            from pyverbs.mr import MR
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "pyverbs is required for RdmaStorage"  # noqa: TRY003
+            ) from exc
+
+        self._ctx = Context()  # Use first available device
+        self._pd = PD(self._ctx)
+        self._buffer = bytearray(size)
+        self._mr = MR(self._pd, self._buffer, len(self._buffer))
+        self._size = size
+
+    def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
+        data = bytes(self._buffer).rstrip(b"\x00")
+        if not data:
+            return None
+        return json.loads(data.decode())
+
+    def write(self, data: Dict[str, Dict[str, Any]]) -> None:
+        serialized = json.dumps(data).encode()
+        if len(serialized) > self._size:
+            raise ValueError("Data too large for RDMA buffer")
+        self._buffer[: len(serialized)] = serialized
+        self._buffer[len(serialized) :] = b"\x00" * (
+            self._size - len(serialized)
+        )
+
+    def close(self) -> None:
+        try:
+            self._mr.close()
+        finally:
+            self._ctx.close()
+
