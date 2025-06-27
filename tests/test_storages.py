@@ -6,7 +6,7 @@ import tempfile
 import pytest
 
 from tinydb import TinyDB, where
-from tinydb.storages import JSONStorage, MemoryStorage, Storage, touch
+from tinydb.storages import JSONStorage, MemoryStorage, Storage, touch, RdmaStorage
 from tinydb.table import Document
 
 random.seed()
@@ -144,6 +144,19 @@ def test_in_memory():
 def test_in_memory_close():
     with TinyDB(storage=MemoryStorage) as db:
         db.insert({})
+
+
+def test_rdma_storage():
+    storage = RdmaStorage()
+    storage.write(doc)
+
+    # Attach a second storage to the same shared memory block
+    other = RdmaStorage(name=storage.name)
+
+    assert doc == other.read()
+
+    storage.close()
+    other.close()
 
 
 def test_custom():

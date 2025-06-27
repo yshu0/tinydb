@@ -10,7 +10,7 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional
 
-__all__ = ('Storage', 'JSONStorage', 'MemoryStorage')
+__all__ = ('Storage', 'JSONStorage', 'MemoryStorage', 'RdmaStorage')
 
 
 def touch(path: str, create_dirs: bool):
@@ -175,3 +175,51 @@ class MemoryStorage(Storage):
 
     def write(self, data: Dict[str, Dict[str, Any]]):
         self.memory = data
+
+
+class RdmaStorage(Storage):
+    """Experimental storage using shared memory to mimic RDMA behavior."""
+
+    def __init__(self, name: Optional[str] = None, size: int = 1024 * 1024):
+        """Create a new instance.
+
+        :param name: Name of the shared memory block. If ``None`` a new block
+            is created.
+        :param size: Size of the shared memory block in bytes when creating
+            a new one.
+        """
+
+        super().__init__()
+
+        from multiprocessing import shared_memory
+
+        if name is None:
+            self._shm = shared_memory.SharedMemory(create=True, size=size)
+            self.name = self._shm.name
+            self._creator = True
+        else:
+            self._shm = shared_memory.SharedMemory(name=name, create=False)
+            self.name = name
+            self._creator = False
+
+        self._size = size
+        self._buffer = self._shm.buf
+
+    def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
+        data = bytes(self._buffer).rstrip(b"\x00")
+        if not data:
+            return None
+        return json.loads(data.decode())
+
+    def write(self, data: Dict[str, Dict[str, Any]]) -> None:
+        serialized = json.dumps(data).encode()
+        if len(serialized) > self._size:
+            raise ValueError("Data too large for RDMA buffer")
+        self._buffer[: len(serialized)] = serialized
+        self._buffer[len(serialized) :] = b"\x00" * (self._size - len(serialized))
+
+    def close(self) -> None:
+        self._shm.close()
+        if self._creator:
+            self._shm.unlink()
+
