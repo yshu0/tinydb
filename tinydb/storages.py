@@ -178,32 +178,30 @@ class MemoryStorage(Storage):
 
 
 class RdmaStorage(Storage):
-    """Experimental storage using shared memory to mimic RDMA behavior."""
+    """Storage using an RDMA memory region via :mod:`pyverbs`."""
 
-    def __init__(self, name: Optional[str] = None, size: int = 1024 * 1024):
+    def __init__(self, size: int = 1024 * 1024):
         """Create a new instance.
 
-        :param name: Name of the shared memory block. If ``None`` a new block
-            is created.
-        :param size: Size of the shared memory block in bytes when creating
-            a new one.
+        :param size: Size of the RDMA buffer in bytes.
         """
 
         super().__init__()
 
-        from multiprocessing import shared_memory
+        try:
+            from pyverbs.device import Context
+            from pyverbs.pd import PD
+            from pyverbs.mr import MR
+        except Exception as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "pyverbs is required for RdmaStorage"  # noqa: TRY003
+            ) from exc
 
-        if name is None:
-            self._shm = shared_memory.SharedMemory(create=True, size=size)
-            self.name = self._shm.name
-            self._creator = True
-        else:
-            self._shm = shared_memory.SharedMemory(name=name, create=False)
-            self.name = name
-            self._creator = False
-
+        self._ctx = Context()  # Use first available device
+        self._pd = PD(self._ctx)
+        self._buffer = bytearray(size)
+        self._mr = MR(self._pd, self._buffer, len(self._buffer))
         self._size = size
-        self._buffer = self._shm.buf
 
     def read(self) -> Optional[Dict[str, Dict[str, Any]]]:
         data = bytes(self._buffer).rstrip(b"\x00")
@@ -216,10 +214,13 @@ class RdmaStorage(Storage):
         if len(serialized) > self._size:
             raise ValueError("Data too large for RDMA buffer")
         self._buffer[: len(serialized)] = serialized
-        self._buffer[len(serialized) :] = b"\x00" * (self._size - len(serialized))
+        self._buffer[len(serialized) :] = b"\x00" * (
+            self._size - len(serialized)
+        )
 
     def close(self) -> None:
-        self._shm.close()
-        if self._creator:
-            self._shm.unlink()
+        try:
+            self._mr.close()
+        finally:
+            self._ctx.close()
 
